@@ -74,6 +74,7 @@ namespace SCILL
         /// </summary>
         public static SCILLManager Instance; // **<- reference link to SCILL
 
+        [Header("Required Settings")]
         /// <summary>
         ///     This is the App id which you can find in the Admin Panel for your app.
         /// </summary>
@@ -89,12 +90,18 @@ namespace SCILL
 
         [Tooltip("Set the language")] public SupportedLanguages language;
 
+
+        /// <summary>
+        /// Enables additional Unity logs for testing.
+        /// </summary>
+        [Header("Development/Testing options")] [Tooltip("Enable additional logs for debugging.")]
+        public bool VerboseMode = false;
+
         /// <summary>
         ///     The API key used to authenticate requests. You can get your API-key in the SCILL Admin Panel.
         ///     This is for testing purposes. In production, you should implement a simple backend function to generate an access
         ///     token for your user id.
         /// </summary>
-        [Header("Development/Testing options")]
         [Tooltip("Set your API key here. You can get your API-key in the SCILL Admin Panel.")]
         public string APIKey;
 
@@ -175,6 +182,11 @@ namespace SCILL
             {
                 Instance = this;
 
+                Promise.UnhandledException += (sender, args) =>
+                {
+                    Debug.LogError($"SCILL exception: {args.Exception.Message}");
+                };
+                
                 _scillBackend = new SCILLBackend(APIKey, environment);
                 GenerateAccessToken(
                     accessToken =>
@@ -186,20 +198,21 @@ namespace SCILL
                         ScillMqtt.OnMqttConnectionEstablished += OnMqttConnectionEstablished;
 
                         IsConnected = true;
+
+                        if (ShouldPrintLog())
+                            Debug.Log(
+                                $"SCILLManager is now connected.");
                         OnSCILLManagerReady?.Invoke();
 
                         StartCoroutine(PingRoutine());
-
-                        // Debug.Log("Successfully retrieved access token.");
                     },
                     e =>
                     {
                         SCILLNotificationManager.Instance?.AddNotification(SCILLNotificationType.Error,
                             "Failed to generate access token");
-                        Debug.LogError(e.Message);
+                        Debug.LogError("SCILLManager could not connect.");
                     },
                     GetUserId());
-
 
                 DontDestroyOnLoad(gameObject);
             }
@@ -252,6 +265,11 @@ namespace SCILL
             }
         }
 
+        private bool ShouldPrintLog()
+        {
+            return VerboseMode;
+        }
+
         /// <summary>
         ///     This uses the <c>SCILLBackend</c>  class to call the <c>GenerateAccessToken</c>  function to directly call
         ///     SCILL backend with
@@ -279,7 +297,19 @@ namespace SCILL
         public virtual IPromise<string> GenerateAccessToken(string userId)
         {
             // Override this function and generate an access token in the backend!
-            return _scillBackend.GetAccessTokenAsync(userId);
+            var accessTokenAsync = _scillBackend.GetAccessTokenAsync(userId);
+            accessTokenAsync.Then(token =>
+            {
+                if (ShouldPrintLog())
+                    Debug.Log($"Successfully received access token for userId {userId}");
+                return accessTokenAsync;
+            }).Catch(
+                e =>
+                {
+                    Debug.LogError(e.Message);
+                    throw e;
+                });
+            return accessTokenAsync;
         }
 
         /// <summary>
@@ -299,10 +329,15 @@ namespace SCILL
             if (null != callback)
                 userInfoPromise.Then(result =>
                 {
-                    if (result.Equals(userInfo)) callback(true);
+                    callback(result.Equals(userInfo));
+                    if(ShouldPrintLog())
+                        Debug.Log($"Successfully set user info to: {result}");
 
+                }).Catch(err =>
+                {
+                    Debug.LogError(err);
                     callback(false);
-                }).Catch(err => callback(false));
+                });
         }
 
 
@@ -313,14 +348,14 @@ namespace SCILL
         /// <param name="reject">Called on API response failure.</param>
         public virtual void GetUserInfoAsync(Action<UserInfo> resolve, Action<Exception> reject)
         {
-            try
+            IPromise<UserInfo> userInfoAsync = SCILLClient.AuthApi.GetUserInfoAsync();
+            userInfoAsync.Then(result =>
             {
-                SCILLClient.AuthApi.GetUserInfoAsync().Then(resolve).Catch(reject);
-            }
-            catch (ApiException e)
+
+            }).Catch(e =>
             {
-                reject(e);
-            }
+                Debug.LogError(e);
+            });
         }
 
         /// <summary>
@@ -493,6 +528,11 @@ namespace SCILL
                 "Event failed: " + eventName);
         }
 
+        private static void HandleApiException(Exception e)
+        {
+            Debug.LogError("SCILL exception: " + e);
+        }
+
         /// <summary>
         ///     Sends an event using <c>EventsApi.SendEvent</c> method for a specific <paramref name="userId" />. See
         ///     <see cref="SendEventAsync(string,string,string,SCILL.Model.EventMetaData)" /> for further information.
@@ -604,6 +644,9 @@ namespace SCILL
         /// <param name="mqttclient">The mqtt client which established the connection.</param>
         private void OnMqttConnectionEstablished(ScillMqtt mqttclient)
         {
+            if (ShouldPrintLog())
+                Debug.Log("SCILL: Successfully established MQTT connection for realtime updates.");
+
             if (null != _personalChallengeNotificationTopic)
                 if (!mqttclient.IsSubscriptionActive(_personalChallengeNotificationTopic))
                     mqttclient.SubscribeToTopicChallenge(_personalChallengeNotificationTopic,
@@ -630,14 +673,12 @@ namespace SCILL
             OnChallengeChangedNotification += handler;
 
             if (ShouldShartupChallengeMonitoring() && null != SCILLClient)
-            {
                 SCILLClient.AuthApi.GetUserChallengesNotificationTopicAsync().Then(topicRequestResult =>
                 {
                     _personalChallengeNotificationTopic = topicRequestResult.topic;
                     if (IsMqttConnectionAvailable())
                         _mqtt.SubscribeToTopicChallenge(topicRequestResult.topic, OnChallengeChangedNotification);
                 });
-            }
         }
 
         private bool ShouldShartupChallengeMonitoring()
